@@ -1,0 +1,5 @@
+src/dagma/__pycache__/
+.dagma/
+*~
+*.png
+

@@ -80,6 +80,7 @@ class DagmaLinear:
         G_h = 2 * W * sla.inv(M).T 
         return h, G_h
 
+
     def _func(self, W: np.ndarray, mu: float, s: float = 1.0) -> typing.Tuple[float, np.ndarray]:
         r"""
         Evaluate value of the penalized objective function.
@@ -129,6 +130,7 @@ class DagmaLinear:
         v_hat = self.opt_v / (1 - beta_2 ** iter)
         grad = m_hat / (np.sqrt(v_hat) + 1e-8)
         return grad
+
     
     def minimize(self, 
                  W: np.ndarray, 
