@@ -1,11 +1,16 @@
 import typing
+import csv
+from pathlib import Path
 
 import numpy as np
 import scipy.linalg as sla
 from scipy.special import expit as sigmoid
 from tqdm.auto import tqdm
 
-from linear_query import QueryDagmaLinear
+try:
+    from .linear_query import QueryDagmaLinear
+except ImportError:
+    from linear_query import QueryDagmaLinear
 
 
 __all__ = ["CPDAGQueryDagmaLinear"]
@@ -362,7 +367,16 @@ class CPDAGQueryDagmaLinear(QueryDagmaLinear):
         return W, True
 
 
-def test(B_true: np.ndarray, cpdag: typing.Optional[np.ndarray] = None) -> None:
+def experiment(
+    B_true: np.ndarray,
+    cpdag: typing.Optional[np.ndarray],
+    src: int,
+    dst: int,
+    graph_name: str = "graph",
+    query_label: typing.Optional[str] = None,
+    id_status: str = "unknown",
+    csv_path: str = "cpdag_query_results.csv",
+) -> None:
     import matplotlib.pyplot as plt
     import utils
     from timeit import default_timer as timer
@@ -372,6 +386,8 @@ def test(B_true: np.ndarray, cpdag: typing.Optional[np.ndarray] = None) -> None:
     n, d = 5000, B_true.shape[0]
     sem_type = "gauss"
     scale  = np.random.uniform(low=0.5, high=1, size=d)
+    if query_label is None:
+        query_label = f"{src}->{dst}"
     if cpdag is None:
         cpdag = B_true.copy()
 
@@ -379,87 +395,204 @@ def test(B_true: np.ndarray, cpdag: typing.Optional[np.ndarray] = None) -> None:
     X = utils.simulate_linear_sem(W_true, n, sem_type, noise_scale=scale)
 
     queries = [
-        ("baseline X->Z", 0, 2, None),
-        ("maximize X->Z", 0, 2, "maximize"),
-        ("minimize X->Z", 0, 2, "minimize"),
-        ("baseline X->Y", 0, 1, None),
-        ("maximize X->Y", 0, 1, "maximize"),
-        ("minimize X->Y", 0, 1, "minimize"),
+        (f"baseline {src}->{dst}", src, dst, None),
+        (f"maximize {src}->{dst}", src, dst, "maximize"),
+        (f"minimize {src}->{dst}", src, dst, "minimize"),
     ]
     settings = [
         ("with CPDAG", cpdag),
         ("without CPDAG", None),
     ]
-    fig, axes = plt.subplots(6, 2, figsize=(12, 24), sharex=False)
+    fig, axes = plt.subplots(3, 2, figsize=(12, 12), sharex=False)
     axes = axes.ravel()
+    csv_file = Path(csv_path)
+    write_header = not csv_file.exists()
+    fieldnames = [
+        "graph_name",
+        "query_label",
+        "id_status",
+        "cpdag_setting",
+        "query_mode",
+        "src",
+        "dst",
+        "is_dag",
+        "h_final",
+        "fdr",
+        "tpr",
+        "fpr",
+        "shd",
+        "nnz",
+        "true_total_effect",
+        "estimated_total_effect",
+        "runtime_seconds",
+    ]
 
     ax_idx = 0
-    for setting_label, setting_cpdag in settings:
-        print(f"=== {setting_label} ===")
-        for label, src, dst, mode in queries:
-            ax = axes[ax_idx]
-            ax_idx += 1
+    with csv_file.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
 
-            model = CPDAGQueryDagmaLinear(loss_type="l2")
-            start = timer()
-            fit_kwargs = dict(
-                X=X,
-                lambda1=0.02,
-            )
-            if setting_cpdag is not None:
-                fit_kwargs["cpdag"] = setting_cpdag
-            if mode is not None:
-                fit_kwargs.update(
-                    effect_src=src,
-                    effect_dst=dst,
-                    effect_mode=mode,
-                    gamma_init=1e-5,
-                    gamma_factor=2.0,
-                    gamma_warmup=2,
+        for setting_label, setting_cpdag in settings:
+            print(f"=== {setting_label} ===")
+            for label, src, dst, mode in queries:
+                ax = axes[ax_idx]
+                ax_idx += 1
+
+                model = CPDAGQueryDagmaLinear(loss_type="l2")
+                start = timer()
+                fit_kwargs = dict(
+                    X=X,
+                    lambda1=0.02,
                 )
-            else:
-                fit_kwargs.update(
-                    gamma_init=0.0,
-                    gamma_factor=1.0,
-                    gamma_warmup=0,
+                if setting_cpdag is not None:
+                    fit_kwargs["cpdag"] = setting_cpdag
+                if mode is not None:
+                    fit_kwargs.update(
+                        effect_src=src,
+                        effect_dst=dst,
+                        effect_mode=mode,
+                        gamma_init=1e-5,
+                        gamma_factor=2.0,
+                        gamma_warmup=2,
+                    )
+                else:
+                    fit_kwargs.update(
+                        gamma_init=0.0,
+                        gamma_factor=1.0,
+                        gamma_warmup=0,
+                    )
+                W_est = model.fit(**fit_kwargs)
+                end = timer()
+                is_dag = utils.is_dag(W_est)
+                true_total_effect = model.total_effect(W_true, src, dst)
+                total_effect = model.total_effect(W_est, src, dst)
+                runtime = end - start
+
+                print(f"{setting_label} | {label}")
+                print(f"is_dag: {is_dag}")
+                print(f"final h: {model.h_final:.4e}")
+                acc = None
+                if is_dag:
+                    acc = utils.count_accuracy(B_true, W_est != 0)
+                    print(acc)
+                else:
+                    print("accuracy skipped because learned W is not a DAG")
+                print("learned W:")
+                print(W_est)
+                print(f"true total effect: {true_total_effect:.4f}")
+                print(f"computed total effect: {total_effect:.4f}")
+                print(f"time: {runtime:.4f}s")
+                print()
+
+                writer.writerow(
+                    {
+                        "graph_name": graph_name,
+                        "query_label": query_label,
+                        "id_status": id_status,
+                        "cpdag_setting": setting_label,
+                        "query_mode": "baseline" if mode is None else mode,
+                        "src": src,
+                        "dst": dst,
+                        "is_dag": is_dag,
+                        "h_final": model.h_final,
+                        "fdr": "" if acc is None else acc["fdr"],
+                        "tpr": "" if acc is None else acc["tpr"],
+                        "fpr": "" if acc is None else acc["fpr"],
+                        "shd": "" if acc is None else acc["shd"],
+                        "nnz": "" if acc is None else acc["nnz"],
+                        "true_total_effect": true_total_effect,
+                        "estimated_total_effect": total_effect,
+                        "runtime_seconds": runtime,
+                    }
                 )
-            W_est = model.fit(**fit_kwargs)
-            end = timer()
-            is_dag = utils.is_dag(W_est)
-            true_total_effect = model.total_effect(W_true, src, dst)
-            total_effect = model.total_effect(W_est, src, dst)
 
-            print(f"{setting_label} | {label}")
-            print(f"is_dag: {is_dag}")
-            print(f"final h: {model.h_final:.4e}")
-            if is_dag:
-                acc = utils.count_accuracy(B_true, W_est != 0)
-                print(acc)
-            else:
-                print("accuracy skipped because learned W is not a DAG")
-            print("learned W:")
-            print(W_est)
-            print(f"true total effect: {true_total_effect:.4f}")
-            print(f"computed total effect: {total_effect:.4f}")
-            print(f"time: {end-start:.4f}s")
-            print()
-
-            steps = np.array(model.loss_history["step"])
-            ax.plot(steps, model.loss_history["score_loss"], label="score loss")
-            ax.plot(steps, model.loss_history["query_loss"], label="query loss")
-            ax.plot(steps, model.loss_history["acyclicity_loss"], label="acyclicity loss")
-            ax.set_title(f"{setting_label} | {label}")
-            ax.set_xlabel("inner iteration")
-            ax.set_ylabel("loss")
-            ax.set_yscale("symlog", linthresh=1e-8)
-            ax.legend()
+                steps = np.array(model.loss_history["step"])
+                ax.plot(steps, model.loss_history["score_loss"], label="score loss")
+                ax.plot(steps, model.loss_history["query_loss"], label="query loss")
+                ax.plot(steps, model.loss_history["acyclicity_loss"], label="acyclicity loss")
+                ax.set_title(f"{setting_label} | {label}")
+                ax.set_xlabel("inner iteration")
+                ax.set_ylabel("loss")
+                ax.set_yscale("symlog", linthresh=1e-8)
+                ax.legend()
 
     fig.tight_layout()
     fig.savefig("cpdag_query_loss_curves.png", dpi=200, bbox_inches="tight")
     plt.close(fig)
 
 
+def plot_max_min_gaps(
+    csv_path: str = "cpdag_query_results.csv",
+    output_path: str = "cpdag_max_min_gaps.png",
+) -> None:
+    import matplotlib.pyplot as plt
+
+    rows = []
+    with Path(csv_path).open(newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["query_mode"] not in {"maximize", "minimize"}:
+                continue
+            rows.append(row)
+
+    grouped = {}
+    for row in rows:
+        key = (row["graph_name"], row["query_label"], row["id_status"])
+        grouped.setdefault(key, {"with CPDAG": {}, "without CPDAG": {}})
+        grouped[key][row["cpdag_setting"]][row["query_mode"]] = float(row["estimated_total_effect"])
+
+    labels = []
+    gaps_with_cpdag = []
+    gaps_without_cpdag = []
+    for (graph_name, query_label, id_status), values in grouped.items():
+        labels.append(f"{graph_name}\n{query_label}\n({id_status})")
+        with_modes = values["with CPDAG"]
+        without_modes = values["without CPDAG"]
+        if "maximize" in with_modes and "minimize" in with_modes:
+            gaps_with_cpdag.append(abs(with_modes["maximize"] - with_modes["minimize"]))
+        else:
+            gaps_with_cpdag.append(np.nan)
+        if "maximize" in without_modes and "minimize" in without_modes:
+            gaps_without_cpdag.append(abs(without_modes["maximize"] - without_modes["minimize"]))
+        else:
+            gaps_without_cpdag.append(np.nan)
+
+    x = np.arange(len(labels))
+    width = 0.38
+    fig, ax = plt.subplots(figsize=(20, 6))
+    ax.bar(x - width / 2, gaps_with_cpdag, width, label="with CPDAG")
+    ax.bar(x + width / 2, gaps_without_cpdag, width, label="without CPDAG")
+    for container in ax.containers:
+        ax.bar_label(container) # Centers labels and uses white text for visibility
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylabel("max-min total effect gap")
+    ax.set_title("Max-Min Gaps by DAG Type and Query")
+    ax.set_yscale("symlog", linthresh=1e-8)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def test(B_true: np.ndarray, cpdag: typing.Optional[np.ndarray] = None) -> None:
+    experiment(B_true, cpdag, src=0, dst=min(2, B_true.shape[0] - 1))
+
+
 if __name__ == "__main__":
+    # Example DAG: X -> Y
+    # CPDAG: X - Y
+    B_two_node = np.array([
+        [0, 1],
+        [0, 0],
+    ])
+    CPDAG_two_node = np.array([
+        [0, 1],
+        [1, 0],
+    ])
+
+    # Example DAG / CPDAG: X -> Y <- Z
     B_collider = np.array([
         [0, 1, 0],
         [0, 0, 0],
@@ -471,6 +604,8 @@ if __name__ == "__main__":
         [0, 1, 0],
     ])
 
+    # Example DAG: X -> Y -> Z
+    # CPDAG: X - Y - Z
     B_chain = np.array([
         [0, 1, 0],
         [0, 0, 1],
@@ -482,8 +617,61 @@ if __name__ == "__main__":
         [0, 1, 0],
     ])
 
-    print("---COLLIDER---")
-    test(B_collider, CPDAG_collider)
+    # Example DAG / CPDAG: X   Y   Z
+    B_three_disconnected = np.zeros((3, 3), dtype=int)
+    CPDAG_three_disconnected = np.zeros((3, 3), dtype=int)
 
-    print("---CHAIN---")
-    test(B_chain, CPDAG_chain)
+    # Node order: [X, Y, Z, W]
+    # Example DAG / CPDAG: Z -> X -> Y, W -> X, W -> Y
+    B_instrumental_variable = np.array([
+        [0, 1, 0, 0],
+        [0, 0, 0, 0],
+        [1, 0, 0, 0],
+        [1, 1, 0, 0],
+    ])
+    CPDAG_instrumental_variable = B_instrumental_variable.copy()
+
+    # Node order: [X, Y, Z, W]
+    # Example DAG / CPDAG: X -> Y <- Z, Y -> W
+    B_descendant_of_collider = np.array([
+        [0, 1, 0, 0],
+        [0, 0, 0, 1],
+        [0, 1, 0, 0],
+        [0, 0, 0, 0],
+    ])
+    CPDAG_descendant_of_collider = B_descendant_of_collider.copy()
+
+    # Node order: [X, Y, Z, W], with Z as the center.
+    # Example DAG: Z -> X, Z -> Y, Z -> W
+    # CPDAG: X - Z - Y and Z - W
+    B_star = np.array([
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        [1, 1, 0, 1],
+        [0, 0, 0, 0],
+    ])
+    CPDAG_star = np.array([
+        [0, 0, 1, 0],
+        [0, 0, 1, 0],
+        [1, 1, 0, 1],
+        [0, 0, 1, 0],
+    ])
+
+    experiments = [
+        ("TWO NODE", "non-ID", B_two_node, CPDAG_two_node, 0, 1),
+        ("COLLIDER", "ID", B_collider, CPDAG_collider, 0, 1),
+        ("CHAIN","non-ID", B_chain, CPDAG_chain, 0, 1),
+        ("THREE DISCONNECTED", "ID", B_three_disconnected, CPDAG_three_disconnected, 0, 1),
+        ("INSTRUMENTAL VARIABLE", "ID", B_instrumental_variable, CPDAG_instrumental_variable, 2, 3),
+        ("INSTRUMENTAL VARIABLE", "ID", B_instrumental_variable, CPDAG_instrumental_variable, 2, 1),
+        ("DESCENDANT OF COLLIDER", "ID", B_descendant_of_collider, CPDAG_descendant_of_collider, 0, 3),
+        ("STAR", "non-ID", B_star, CPDAG_star, 0, 3),
+        ("STAR", "non-ID", B_star, CPDAG_star, 2, 0),
+    ]
+    
+
+    # for name, id_status, B_true, cpdag, src, dst in experiments:
+    #     print(f"---{name}---")
+    #     experiment(B_true, cpdag, src=src, dst=dst, graph_name=name, id_status=status)
+
+    plot_max_min_gaps()
